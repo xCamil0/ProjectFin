@@ -1,5 +1,9 @@
 import 'package:flutter/material.dart';
 
+import 'dart:convert';
+
+import 'package:shared_preferences/shared_preferences.dart';
+
 void main() {
   runApp(const MiappFinanazas());
 }
@@ -12,12 +16,43 @@ enum TipoIngreso { arriendo, cosas, otro }
 
 enum TipoDivisa { USD, COP, ARS }
 
+class ServicioMovimiento {
+  static const String _keyMovimientos = 'lista_movimientos_key';
+
+  static Future<void> guardarMovimientos(
+    List<Movimiento> listaMovimientos,
+  ) async {
+    final prefs = await SharedPreferences.getInstance();
+
+    List<String> listaJson = listaMovimientos
+        .map((movimiento) => jsonEncode(movimiento.toMap()))
+        .toList();
+
+    await prefs.setStringList(_keyMovimientos, listaJson);
+  }
+
+  static Future<List<Movimiento>> cargarMovimientos() async {
+    final prefs = await SharedPreferences.getInstance();
+    final List<String>? listaJson = prefs.getStringList(_keyMovimientos);
+
+    if (listaJson == null) {
+      return [];
+    }
+
+    return listaJson.map((textoJson) {
+      final Map<String, dynamic> mapa = jsonDecode(textoJson);
+      return Movimiento.fromMap(mapa);
+    }).toList();
+  }
+}
+
 class Movimiento {
   // 1. Atributos
   String id;
   String titulo;
   double monto;
   DateTime fecha;
+  DateTime hora;
   TipoMovimiento tipoMovimiento;
   TipoDivisa divisa;
 
@@ -27,9 +62,36 @@ class Movimiento {
     required this.titulo,
     required this.monto,
     required this.fecha,
+    required this.hora,
     required this.tipoMovimiento,
     required this.divisa,
   });
+
+  Map<String, dynamic> toMap() {
+    return {
+      "id": id,
+      "titulo": titulo,
+      "monto": monto,
+      "fecha": fecha.toIso8601String(),
+      "hora": hora.toIso8601String(),
+      "tipoMovimiento": tipoMovimiento.name,
+      "tipoDivisa": divisa.name,
+    };
+  }
+
+  factory Movimiento.fromMap(Map<String, dynamic> map) {
+    return Movimiento(
+      id: map["id"] as String,
+      titulo: map["titulo"] as String,
+      monto: (map["monto"] as num).toDouble(),
+      fecha: DateTime.parse(map["fecha"] as String),
+      hora: DateTime.parse(map["hora"] as String),
+      tipoMovimiento: TipoMovimiento.values.byName(
+        map["tipoMovimiento"] as String,
+      ),
+      divisa: TipoDivisa.values.byName(map["tipoDivisa"] as String),
+    );
+  }
 }
 
 class MiappFinanazas extends StatelessWidget {
@@ -57,6 +119,20 @@ class _PantallaFinanzasState extends State<PantallaFinanzas> {
   TipoDivisa divisaSeleccionada = TipoDivisa.USD;
 
   List<Movimiento> listaMovimientos = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _cargarDatosIniciales();
+  }
+
+  Future<void> _cargarDatosIniciales() async {
+    final datosCargados = await ServicioMovimiento.cargarMovimientos();
+
+    setState(() {
+      listaMovimientos = datosCargados;
+    });
+  }
 
   double convertirAUSD(double montolocal, TipoDivisa divisa) {
     switch (divisa) {
@@ -101,16 +177,18 @@ class _PantallaFinanzasState extends State<PantallaFinanzas> {
       titulo: tituloController.text,
       monto: convertirAUSD(montoIngresado, divisaSeleccionada),
       fecha: DateTime.now(),
+      hora: DateTime.now(),
       tipoMovimiento: tipoSeleccionado,
       divisa: divisaSeleccionada,
     );
 
     setState(() {
-      listaMovimientos.add(nuevoMovimiento);
+      listaMovimientos.insert(0, nuevoMovimiento);
       total = calcularTotal();
       tituloController.clear();
       montoController.clear();
     });
+    ServicioMovimiento.guardarMovimientos(listaMovimientos);
   }
 
   @override
@@ -328,50 +406,84 @@ class _PantallaFinanzasState extends State<PantallaFinanzas> {
               margin: EdgeInsets.all(8.0),
               child: ListView.builder(
                 shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
                 itemCount: listaMovimientos.length,
                 itemBuilder: (context, index) {
                   final movimiento = listaMovimientos[index];
-                  return ListTile(
-                    leading: Icon(
-                      movimiento.tipoMovimiento == TipoMovimiento.ingreso
-                          ? Icons.add
-                          : Icons.remove,
-                      color: movimiento.tipoMovimiento == TipoMovimiento.ingreso
-                          ? Colors.green
-                          : Colors.red,
+                  return Dismissible(
+                    key: Key(movimiento.id),
+
+                    background: Container(
+                      color: Colors.red,
+                      alignment: Alignment.centerRight,
+                      padding: const EdgeInsets.only(right: 20.0),
+                      child: const Icon(Icons.delete, color: Colors.black),
                     ),
-                    title: Text(movimiento.titulo),
-                    subtitle: Text(
-                      movimiento.fecha.toLocal().toString().split(' ')[0],
-                    ),
-                    trailing: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          "\$${movimiento.monto.toStringAsFixed(2)}",
-                          style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                            color:
-                                movimiento.tipoMovimiento ==
-                                    TipoMovimiento.ingreso
-                                ? Colors.green
-                                : Colors.red,
+
+                    direction: DismissDirection.endToStart,
+
+                    onDismissed: (direction) {
+                      final elementoEliminado = listaMovimientos[index];
+                      final posicionOriginal = index;
+
+                      setState(() {
+                        listaMovimientos.removeAt(index);
+                      });
+                      ServicioMovimiento.guardarMovimientos(listaMovimientos);
+
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text('Elemento eliminado'),
+                          action: SnackBarAction(
+                            label: 'DESHACER',
+                            onPressed: () {
+                              setState(() {
+                                listaMovimientos.insert(
+                                  posicionOriginal,
+                                  elementoEliminado,
+                                );
+                              });
+                              ServicioMovimiento.guardarMovimientos(
+                                listaMovimientos,
+                              );
+                            },
                           ),
                         ),
-                        SizedBox(width: 8.0),
-                        IconButton(
-                          icon: Icon(
-                            Icons.delete,
-                            color: const Color.fromARGB(255, 0, 0, 0),
+                      );
+                    },
+
+                    child: ListTile(
+                      leading: Icon(
+                        movimiento.tipoMovimiento == TipoMovimiento.ingreso
+                            ? Icons.add
+                            : Icons.remove,
+                        color:
+                            movimiento.tipoMovimiento == TipoMovimiento.ingreso
+                            ? Colors.green
+                            : Colors.red,
+                      ),
+                      title: Text(movimiento.titulo),
+                      subtitle: Text(
+                        '${movimiento.fecha.toLocal().toString().split(' ')[0]} - '
+                        '${movimiento.hora.hour.toString().padLeft(2, '0')}:'
+                        '${movimiento.hora.minute.toString().padLeft(2, '0')}',
+                      ),
+                      trailing: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            "\$${movimiento.monto.toStringAsFixed(2)}",
+                            style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              color:
+                                  movimiento.tipoMovimiento ==
+                                      TipoMovimiento.ingreso
+                                  ? Colors.green
+                                  : Colors.red,
+                            ),
                           ),
-                          onPressed: () {
-                            setState(() {
-                              listaMovimientos.removeAt(index);
-                              total = calcularTotal();
-                            });
-                          },
-                        ),
-                      ], // children
+                        ], // children
+                      ),
                     ),
                   );
                 }, // itemBuilder
